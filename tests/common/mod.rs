@@ -43,3 +43,24 @@ pub fn png(img: &DynamicImage) -> Vec<u8> {
         .unwrap();
     buf
 }
+
+/// A JPEG whose Exif orientation tag says `value` (1-8).
+pub fn jpeg_with_orientation(img: &DynamicImage, value: u16) -> Vec<u8> {
+    use image::ImageEncoder;
+    // A big-endian TIFF header and one IFD entry: 0x0112 Orientation, SHORT.
+    let mut exif = b"MM\0\x2a\0\0\0\x08\0\x01\x01\x12\0\x03\0\0\0\x01".to_vec();
+    exif.extend_from_slice(&value.to_be_bytes());
+    exif.extend_from_slice(&[0, 0, 0, 0, 0, 0]);
+    let mut buf = Vec::new();
+    let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, 90);
+    enc.set_exif_metadata(exif).unwrap();
+    let rgb = img.to_rgb8();
+    enc.write_image(
+        &rgb,
+        rgb.width(),
+        rgb.height(),
+        image::ExtendedColorType::Rgb8,
+    )
+    .unwrap();
+    buf
+}

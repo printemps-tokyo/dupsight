@@ -7,15 +7,36 @@ use std::path::Path;
 use crate::group::{Group, Keep, Thresholds};
 use crate::scan::{Image, Skipped};
 
-/// A path as text with control characters escaped, so a file name cannot
-/// drive the terminal.
+/// Text with control characters escaped (`\u{1b}`), so a file name or an
+/// error message cannot drive the terminal.
+pub fn clean(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if c.is_control() {
+                c.escape_default().to_string()
+            } else {
+                c.to_string()
+            }
+        })
+        .collect()
+}
+
+/// A path for people to read: control characters escaped.
 pub fn shown(p: &Path) -> String {
-    let s = p.display().to_string();
-    if s.chars().any(char::is_control) {
-        format!("{s:?}")
-    } else {
-        s
-    }
+    clean(&p.display().to_string())
+}
+
+/// A path as the bytes the system uses, so names that are not UTF-8 reach
+/// another program unchanged.
+#[cfg(unix)]
+pub fn path_bytes(p: &Path) -> Vec<u8> {
+    use std::os::unix::ffi::OsStrExt;
+    p.as_os_str().as_bytes().to_vec()
+}
+
+#[cfg(not(unix))]
+pub fn path_bytes(p: &Path) -> Vec<u8> {
+    p.to_string_lossy().into_owned().into_bytes()
 }
 
 pub fn size(bytes: u64) -> String {
@@ -45,8 +66,8 @@ pub fn orientation(k: usize) -> &'static str {
 fn keep_reason(k: Keep) -> &'static str {
     match k {
         Keep::Largest => "the most pixels",
-        Keep::LargerFile => "same pixels, the largest file",
-        Keep::FirstPath => "all alike, the first by path",
+        Keep::LargerFile => "as many pixels as another, but a larger file",
+        Keep::FirstPath => "the same pixels and bytes as another, the first by path",
     }
 }
 
@@ -111,19 +132,20 @@ pub fn text(images: &[Image], groups: &[Group], skipped: &[Skipped], t: Threshol
     let in_groups: usize = groups.iter().map(|g| g.members.len()).sum();
     let _ = writeln!(
         s,
-        "{} group{}, {} images in them ({} besides the ones to keep); {} images scanned{}; limits dHash {}, pHash {}.",
+        "{} group{}, {} images in them ({} besides the ones to keep); {} image{} scanned{}; limits dHash {}, pHash {}.",
         groups.len(),
         if groups.len() == 1 { "" } else { "s" },
         in_groups,
         in_groups - groups.len(),
         images.len(),
+        if images.len() == 1 { "" } else { "s" },
         if skipped.is_empty() { String::new() } else { format!(", {} file{} could not be read", skipped.len(), if skipped.len() == 1 { "" } else { "s" }) },
         t.dhash,
         t.phash
     );
     if !skipped.is_empty() {
         for k in skipped.iter().take(20) {
-            let _ = writeln!(s, "  skipped {}: {}", shown(&k.path), k.reason);
+            let _ = writeln!(s, "  skipped {}: {}", shown(&k.path), clean(&k.reason));
         }
         if skipped.len() > 20 {
             let _ = writeln!(s, "  ... and {} more", skipped.len() - 20);
@@ -215,9 +237,13 @@ fn html_escape(s: &str) -> String {
 /// A file: URL for a local path, every byte outside the unreserved set and
 /// "/" percent-encoded.
 pub fn file_url(p: &Path) -> String {
-    let abs = std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let abs = std::fs::canonicalize(p).unwrap_or_else(|_| {
+        std::env::current_dir()
+            .map(|d| d.join(p))
+            .unwrap_or_else(|_| p.to_path_buf())
+    });
     let mut out = String::from("file://");
-    for b in abs.to_string_lossy().bytes() {
+    for b in path_bytes(&abs) {
         if b.is_ascii_alphanumeric() || b"-._~/".contains(&b) {
             out.push(b as char);
         } else {

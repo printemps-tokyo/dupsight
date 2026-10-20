@@ -107,6 +107,10 @@ struct ScanArgs {
     /// Exit 1 when any group is found (for CI)
     #[arg(long)]
     check: bool,
+
+    /// Images decoded at the same time (default: one per CPU); fewer use less memory
+    #[arg(short, long, value_name = "N", value_parser = clap::value_parser!(u16).range(1..))]
+    jobs: Option<u16>,
 }
 
 #[derive(clap::Args, Debug)]
@@ -120,26 +124,32 @@ struct CompareArgs {
     matching: Match,
 }
 
-/// A path as the bytes the system uses, so names that are not UTF-8 reach
-/// another program unchanged.
-#[cfg(unix)]
-fn path_bytes(p: &std::path::Path) -> Vec<u8> {
-    use std::os::unix::ffi::OsStrExt;
-    p.as_os_str().as_bytes().to_vec()
-}
-
-#[cfg(not(unix))]
-fn path_bytes(p: &std::path::Path) -> Vec<u8> {
-    p.to_string_lossy().into_owned().into_bytes()
-}
-
 fn run(cli: Cli) -> Result<ExitCode> {
     let mut out = std::io::stdout().lock();
     match cli.command {
         Command::Scan(a) => {
             let t = a.matching.thresholds();
+            if let Some(n) = a.jobs {
+                rayon::ThreadPoolBuilder::new()
+                    .num_threads(n as usize)
+                    .build_global()
+                    .context("cannot start the worker threads")?;
+            }
             let (files, mut skipped) =
                 scan::find(&a.paths, a.hidden).map_err(anyhow::Error::msg)?;
+            if let Some(path) = &a.html {
+                // The report must never land on a picture being scanned.
+                if scan::is_image(path) {
+                    bail!(
+                        "{}: the report needs a name that is not an image's (such as report.html)",
+                        report::shown(path)
+                    );
+                }
+                let key = scan::file_key(path);
+                if key.is_some() && files.iter().any(|f| scan::file_key(f) == key) {
+                    bail!("{}: this is one of the scanned files", report::shown(path));
+                }
+            }
             let (images, unread) = scan::scan(&files, a.matching.rotations);
             skipped.extend(unread);
             let found = groups(&images, t);
@@ -150,13 +160,26 @@ fn run(cli: Cli) -> Result<ExitCode> {
             if a.extras {
                 let end = if a.null { "\0" } else { "\n" };
                 for p in report::extras(&images, &found) {
-                    out.write_all(&path_bytes(p))?;
+                    out.write_all(&report::path_bytes(p))?;
                     out.write_all(end.as_bytes())?;
+                }
+                // The list has no room for them; tell the person instead.
+                for k in &skipped {
+                    eprintln!(
+                        "dupsight: skipped {}: {}",
+                        report::shown(&k.path),
+                        report::clean(&k.reason)
+                    );
                 }
             } else if a.json {
                 out.write_all(report::json(&images, &found, &skipped, t).as_bytes())?;
             } else {
                 out.write_all(report::text(&images, &found, &skipped, t).as_bytes())?;
+            }
+            out.flush()?;
+            if images.is_empty() && !skipped.is_empty() {
+                eprintln!("dupsight: none of the files could be read");
+                return Ok(ExitCode::from(2));
             }
             Ok(if a.check && !found.is_empty() {
                 ExitCode::FAILURE
@@ -172,10 +195,12 @@ fn run(cli: Cli) -> Result<ExitCode> {
             let a = load(&c.a)?;
             let b = scan::load(&c.b, c.matching.rotations)
                 .map_err(|e| anyhow::anyhow!("{}: {e}", report::shown(&c.b)))?;
-            if a.path == b.path {
+            if scan::file_key(&a.path).is_some()
+                && scan::file_key(&a.path) == scan::file_key(&b.path)
+            {
                 bail!("the two paths are the same file");
             }
-            let m = best_match(&a, &b);
+            let m = best_match(&a, &b, t);
             let same = within(&m, t);
             writeln!(out, "dHash distance {} of 64 (limit {})", m.dhash, t.dhash)?;
             writeln!(out, "pHash distance {} of 64 (limit {})", m.phash, t.phash)?;
@@ -204,7 +229,7 @@ fn main() -> ExitCode {
     match run(Cli::parse()) {
         Ok(code) => code,
         Err(e) => {
-            eprintln!("dupsight: {e:#}");
+            eprintln!("dupsight: {}", report::clean(&format!("{e:#}")));
             ExitCode::from(2)
         }
     }

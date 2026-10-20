@@ -14,11 +14,11 @@ Group 1 (3 images; keep: the most pixels)
         trip/IMG_2041 (1).jpg      4032x3024    3.1 MB  jpeg  identical file
         trip/shared/IMG_2041.jpg   1600x1200    412 KB  jpeg  dHash  1  pHash  0
 
-Group 2 (2 images; keep: same pixels, the largest file)
+Group 2 (2 images; keep: as many pixels as another, but a larger file)
   keep  trip/beach.png             1920x1080    2.4 MB  png
         trip/beach.webp            1920x1080    188 KB  webp  dHash  0  pHash  2
 
-2 groups, 5 images in them (3 besides the ones to keep); 214 images scanned; limits dHash 8, pHash 10.
+2 groups, 5 images in them (3 besides the ones to keep); 214 images scanned; limits dHash 8, pHash 7.
 ```
 
 ## Install
@@ -41,12 +41,19 @@ dupsight scan PHOTOS --rotations          # also turned and mirrored copies
 dupsight scan PHOTOS --json               # for scripts
 dupsight scan PHOTOS --extras             # only the files besides the ones to keep
 dupsight scan assets --check              # exit 1 if any group is found, for CI
+dupsight scan PHOTOS --jobs 2             # decode two images at a time, to use less memory
 dupsight compare a.jpg b.png              # how alike two images are
 ```
 
 `scan` takes files and folders. Folders are walked, without following
 symbolic links and without hidden files and folders unless `--hidden` is given.
-Files that cannot be read are listed at the end and do not stop the scan.
+A file named twice (`a.jpg` and `./a.jpg`, overlapping folders, hard links)
+is scanned once. Files that cannot be read are listed at the end and do not
+stop the scan; if none can be read, dupsight exits with 2.
+
+Photos are seen the way their Exif orientation says they are meant to be
+seen, so a camera file tagged "turn 90 degrees" matches an export with the
+turn baked in, and its width and height are shown as seen.
 
 Formats: JPEG, PNG, WebP, GIF (the first frame), BMP and TIFF. In folders,
 files are picked by their extension (`.jpg`, `.jpeg`, `.png`, `.webp`, `.gif`,
@@ -74,7 +81,9 @@ dupsight scan PHOTOS --extras -0 | xargs -0 rm --      # remove them
 ```
 
 `-0` ends each path with a NUL byte, so names with spaces or newlines are safe
-with `xargs -0`.
+with `xargs -0`. Paths are written exactly as the system has them, even when
+they are not valid UTF-8. Files that could not be read are reported on
+standard error.
 
 ## How alike is alike
 
@@ -94,9 +103,9 @@ their 64 bits:
 
 | `--level` | dHash | pHash | Finds |
 | --- | --- | --- | --- |
-| `strict` | 3 | 4 | the same picture resized, recompressed or converted |
-| `normal` (default) | 8 | 10 | also brighter, darker, blurred or grayscale copies |
-| `loose` | 12 | 14 | also small crops and heavier edits, with more chance of look-alikes |
+| `strict` | 4 | 4 | the same picture resized, recompressed or converted |
+| `normal` (default) | 8 | 7 | also blurred, grayscale and lightly brightened copies |
+| `loose` | 12 | 12 | also small crops and heavier edits, with more chance of look-alikes |
 
 `--max-dhash` and `--max-phash` set the limits directly. `dupsight compare`
 shows both distances for two files, and the limits they were checked against.
@@ -106,16 +115,22 @@ between 13 photos, illustrations and banners and edited copies of each:
 
 | Edit | dHash | pHash |
 | --- | --- | --- |
-| a quarter of the size | 0-3 | 0-1 |
-| JPEG at quality 30 | 0-4 | 0-4 |
-| grayscale | 0-2 | 0-4 |
-| blurred | 0-2 | 0-2 |
-| brighter | 0-5 | 0-8 |
-| more contrast | 0-16 | 0-13 |
-| 5% cropped from each side | 0-9 | 4-17 |
-| 10% cropped from each side | 0-16 | 8-22 |
+| a quarter of the size | 0-1 | 0 |
+| JPEG at quality 30 | 0-4 | 0-3 |
+| grayscale | 0-3 | 0-4 |
+| blurred | 0-1 | 0 |
+| brighter (+30 of 255) | 0-5 | 0-8 |
+| more contrast | 0-17 | 0-13 |
+| 2.5% cropped from each side | 0-10 | 2-16 |
+| 5% cropped from each side | 0-17 | 8-21 |
 
-The closest two unrelated pictures among them were 12/31 and 16/25 apart.
+The closest unrelated pictures among them were 12/30 and 18/24 apart. In a
+larger run over 2,000 images from our own projects, all 1,332 pairs found
+that were copies of one file (resized, converted to WebP, re-encoded) were
+within a pHash distance of 2, while different pictures that share a layout, such as
+blog banners from one template, an icon on a plain background next to
+another, or screenshots of one app, came as close as 8/10. That is why the
+default pHash limit is 7.
 
 ### What it does not find
 
@@ -127,8 +142,9 @@ The closest two unrelated pictures among them were 12/31 and 16/25 apart.
   since they do look almost the same; that is usually what you want, but check
   the report.
 
-Screenshots of the same app or page look alike to these hashes even when the
-details differ. Use `--level strict` for folders of screenshots.
+Screenshots of the same app or page, and banners made from one template, look
+alike to these hashes even when the details differ. Use `--level strict` for
+such folders, and look at the HTML report before removing anything.
 
 ## Output
 
@@ -157,7 +173,18 @@ turns the file into the kept one: 0 as it is, 1-3 that many quarter turns
 clockwise, 4-7 the same followed by a left-right mirror.
 
 The HTML page loads the images from their files through `file://` links, so
-open it on the same computer.
+open it on the same computer. dupsight refuses to write it over a file with an
+image extension or over any of the files being scanned.
+
+JSON paths are text: in the rare file name that is not valid UTF-8, the
+invalid bytes are replaced. Use `--extras -0` when you need exact paths.
+
+### Memory
+
+Each image is decoded whole, then reduced to its thumbnail and let go. One
+image is decoded per CPU at a time, each allowed up to 512 MiB (the image
+crate's default limit; a larger one is skipped). On a machine with many CPUs
+and very large images, `--jobs` lowers how many are decoded at once.
 
 Exit status: 0 when done, 1 when `--check` found a group (or, for `compare`,
 the pictures differ), 2 on an error such as a path that does not exist.

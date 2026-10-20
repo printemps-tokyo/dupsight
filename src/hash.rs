@@ -1,15 +1,16 @@
 //! Perceptual hashes, after Neal Krawetz's descriptions:
-//! - dHash ("Kind of Like That", hackerfactor.com, 2013): a 9x8 grayscale
+//! - dHash ("Kind of Like That", hackerfactor.com): a 9x8 grayscale
 //!   image, one bit per pair of horizontal neighbors, set when the left one is
 //!   darker; 64 bits, left to right, top to bottom.
-//! - pHash ("Looks Like It", hackerfactor.com, 2011): a 32x32 grayscale
+//! - pHash ("Looks Like It", hackerfactor.com): a 32x32 grayscale
 //!   image, its DCT, the top-left 8x8 low frequencies, each bit set when the
 //!   value is above the mean of those 64 values without the first term.
 //!
 //! Both are computed from a 64x64 grayscale thumbnail (transparency over
 //! white), so the eight rotations and flips can be hashed cheaply too.
 
-use image::{DynamicImage, GenericImageView};
+use image::metadata::Orientation;
+use image::DynamicImage;
 
 /// Side of the grayscale thumbnail the hashes are taken from.
 pub const THUMB: usize = 64;
@@ -60,25 +61,95 @@ pub fn resample(src: &[f32], w: usize, h: usize, nw: usize, nh: usize) -> Vec<f3
     out
 }
 
-/// The image as a 64x64 grayscale thumbnail. Large images are first brought
-/// down with the image crate's fast thumbnail filter, then averaged by area.
-pub fn thumbnail(img: &DynamicImage) -> Gray {
-    let (w, h) = img.dimensions();
-    let small = if w > 512 || h > 512 {
-        img.thumbnail_exact(512.min(w), 512.min(h))
-    } else {
-        img.clone()
-    };
-    let rgba = small.to_rgba8();
-    let (w, h) = (rgba.width() as usize, rgba.height() as usize);
-    let luma: Vec<f32> = rgba.pixels().map(|p| luma_over_white(p.0)).collect();
+/// For each source index of a `w`-long axis, the target cells of an
+/// `n`-long axis it overlaps and by how much (in target cells; each target
+/// cell's weights add up to 1).
+fn spans(w: usize, n: usize) -> Vec<Vec<(usize, f64)>> {
+    let scale = n as f64 / w as f64;
+    (0..w)
+        .map(|x| {
+            let (a, b) = (x as f64 * scale, (x + 1) as f64 * scale);
+            (a.floor() as usize..(b.ceil() as usize).min(n))
+                .map(|t| (t, b.min(t as f64 + 1.0) - a.max(t as f64)))
+                .filter(|&(_, wt)| wt > 0.0)
+                .collect()
+        })
+        .collect()
+}
+
+/// Area average of a w x h image, given pixel by pixel, down (or up) to the
+/// thumbnail, in one pass and without a copy of the image.
+fn area_average(w: usize, h: usize, mut pixel: impl FnMut(usize, usize) -> f32) -> Gray {
+    let (xs, ys) = (spans(w, THUMB), spans(h, THUMB));
+    let mut acc = vec![0f64; THUMB * THUMB];
+    let mut row = [0f64; THUMB];
+    for (y, yspan) in ys.iter().enumerate() {
+        row.fill(0.0);
+        for (x, xspan) in xs.iter().enumerate() {
+            let v = pixel(x, y) as f64;
+            for &(t, wt) in xspan {
+                row[t] += v * wt;
+            }
+        }
+        for &(ty, wy) in yspan {
+            for (a, r) in acc[ty * THUMB..(ty + 1) * THUMB].iter_mut().zip(&row) {
+                *a += r * wy;
+            }
+        }
+    }
     Gray {
         side: THUMB,
-        px: resample(&luma, w, h, THUMB, THUMB),
+        px: acc.into_iter().map(|v| v as f32).collect(),
     }
 }
 
-/// The eight orientations: k quarter turns clockwise, then a mirror for 4-7.
+/// The image as a 64x64 grayscale thumbnail: every pixel laid over white
+/// first, then averaged by area, so color hidden under transparent pixels
+/// does not count.
+pub fn thumbnail(img: &DynamicImage) -> Gray {
+    let (w, h) = (img.width() as usize, img.height() as usize);
+    match img {
+        DynamicImage::ImageRgb8(b) => area_average(w, h, |x, y| {
+            let p = b.get_pixel(x as u32, y as u32).0;
+            luma_over_white([p[0], p[1], p[2], 255])
+        }),
+        DynamicImage::ImageRgba8(b) => area_average(w, h, |x, y| {
+            luma_over_white(b.get_pixel(x as u32, y as u32).0)
+        }),
+        DynamicImage::ImageLuma8(b) => {
+            area_average(w, h, |x, y| b.get_pixel(x as u32, y as u32).0[0] as f32)
+        }
+        DynamicImage::ImageLumaA8(b) => area_average(w, h, |x, y| {
+            let [l, a] = b.get_pixel(x as u32, y as u32).0;
+            luma_over_white([l, l, l, a])
+        }),
+        // 16-bit and float images: brought to 8 bits per channel first.
+        other => {
+            let b = other.to_rgba8();
+            area_average(w, h, |x, y| {
+                luma_over_white(b.get_pixel(x as u32, y as u32).0)
+            })
+        }
+    }
+}
+
+/// The index of `orient` that shows an image the way its Exif orientation
+/// says it is meant to be seen.
+pub fn exif_turn(o: Orientation) -> usize {
+    match o {
+        Orientation::NoTransforms => 0,
+        Orientation::Rotate90 => 1,
+        Orientation::Rotate180 => 2,
+        Orientation::Rotate270 => 3,
+        Orientation::FlipHorizontal => 4,
+        Orientation::Rotate90FlipH => 5,
+        Orientation::FlipVertical => 6,
+        Orientation::Rotate270FlipH => 7,
+    }
+}
+
+/// The eight orientations: k quarter turns clockwise, then for 4-7 a
+/// left-right mirror of the result.
 pub fn orient(g: &Gray, k: usize) -> Gray {
     let n = g.side;
     let mut px = vec![0f32; n * n];
@@ -143,20 +214,26 @@ pub fn phash(g: &Gray) -> u64 {
         .fold(0u64, |bits, &c| (bits << 1) | (c > mean) as u64)
 }
 
-/// Hashes of an image, in all eight orientations when `orientations` is set.
-pub fn hashes(img: &DynamicImage, orientations: bool) -> Hashes {
-    let g = thumbnail(img);
+/// Hashes of a thumbnail, in all eight orientations when `orientations` is
+/// set (index 0 as it is). An orientation that looks the same as an earlier
+/// one, as in a symmetric picture, still gets its place in the list.
+pub fn hashes_of(g: &Gray, orientations: bool) -> Hashes {
     let ks = if orientations { 0..8 } else { 0..1 };
     let mut h = Hashes {
         dhash: Vec::new(),
         phash: Vec::new(),
     };
     for k in ks {
-        let o = if k == 0 { g.clone() } else { orient(&g, k) };
+        let o = if k == 0 { g.clone() } else { orient(g, k) };
         h.dhash.push(dhash(&o));
         h.phash.push(phash(&o));
     }
     h
+}
+
+/// Hashes of an image as its pixels are stored (no Exif orientation).
+pub fn hashes(img: &DynamicImage, orientations: bool) -> Hashes {
+    hashes_of(&thumbnail(img), orientations)
 }
 
 pub fn distance(a: u64, b: u64) -> u32 {

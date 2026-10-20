@@ -1,7 +1,10 @@
 mod common;
 
 use common::picture;
-use dupsight::hash::{dhash, distance, hashes, orient, phash, resample, thumbnail, Gray};
+use dupsight::hash::{
+    dhash, distance, exif_turn, hashes, orient, phash, resample, thumbnail, Gray,
+};
+use image::metadata::Orientation;
 use image::{imageops::FilterType, DynamicImage, ImageBuffer, Luma};
 
 fn gray(side: usize, f: impl Fn(usize, usize) -> f32) -> Gray {
@@ -123,4 +126,79 @@ fn edits_stay_close_and_other_pictures_far() {
         let (d, p) = near(&picture(seed, 800, 600));
         assert!(d > 12 || p > 14, "seed {seed}: dHash {d}, pHash {p}");
     }
+}
+
+fn close(a: &Gray, b: &Gray) -> bool {
+    a.px.iter().zip(&b.px).all(|(x, y)| (x - y).abs() < 0.01)
+}
+
+#[test]
+fn exif_orientations_map_to_the_same_turns() {
+    // Each Exif orientation applied to the pixels gives the thumbnail that
+    // `orient` gives, so a tagged photo and its baked-in export hash alike.
+    let img = picture(4, 96, 64);
+    let g = thumbnail(&img);
+    for o in [
+        Orientation::NoTransforms,
+        Orientation::Rotate90,
+        Orientation::Rotate180,
+        Orientation::Rotate270,
+        Orientation::FlipHorizontal,
+        Orientation::FlipVertical,
+        Orientation::Rotate90FlipH,
+        Orientation::Rotate270FlipH,
+    ] {
+        let mut turned = img.clone();
+        turned.apply_orientation(o);
+        assert!(
+            close(&thumbnail(&turned), &orient(&g, exif_turn(o))),
+            "{o:?}"
+        );
+    }
+}
+
+#[test]
+fn thumbnail_is_an_area_average_at_any_size() {
+    // Two 64-wide halves of different gray, any size: the thumbnail's left
+    // half is the one gray and its right half the other.
+    for (w, h) in [(640, 480), (65, 7), (10, 10), (3000, 2)] {
+        let img = DynamicImage::ImageLuma8(ImageBuffer::from_fn(w, h, |x, _| {
+            Luma([if x < w / 2 { 40 } else { 200 }])
+        }));
+        let g = thumbnail(&img);
+        if w % 2 == 0 {
+            assert!(
+                (g.px[0] - 40.0).abs() < 0.01 && (g.px[63] - 200.0).abs() < 0.01,
+                "{w}x{h}"
+            );
+        }
+        let mean = g.px.iter().sum::<f32>() / g.px.len() as f32;
+        let want = (40.0 * (w / 2) as f32 + 200.0 * (w - w / 2) as f32) / w as f32;
+        assert!((mean - want).abs() < 0.05, "{w}x{h}: {mean} {want}");
+    }
+}
+
+#[test]
+fn color_under_transparency_does_not_count() {
+    // A large image, half of it transparent over random colors, looks the
+    // same as the same image flattened onto white.
+    let base = picture(5, 900, 700).to_rgba8();
+    let hidden = image::RgbaImage::from_fn(900, 700, |x, y| {
+        let p = base.get_pixel(x, y).0;
+        if x < 450 {
+            image::Rgba([p[2], p[0], p[1], 0])
+        } else {
+            image::Rgba(p)
+        }
+    });
+    let flat = image::RgbaImage::from_fn(900, 700, |x, y| {
+        if x < 450 {
+            image::Rgba([255, 255, 255, 255])
+        } else {
+            *base.get_pixel(x, y)
+        }
+    });
+    let a = thumbnail(&DynamicImage::ImageRgba8(hidden));
+    let b = thumbnail(&DynamicImage::ImageRgba8(flat));
+    assert!(close(&a, &b));
 }

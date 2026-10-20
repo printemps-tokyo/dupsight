@@ -3,7 +3,7 @@ mod common;
 use std::path::Path;
 use std::process::{Command, Output};
 
-use common::{jpeg, picture, png};
+use common::{jpeg, jpeg_with_orientation, picture, png};
 use image::imageops::FilterType;
 
 fn dupsight(args: &[&str], dir: &Path) -> Output {
@@ -47,12 +47,14 @@ fn scan_groups_copies_and_keeps_the_best() {
     let o = dupsight(&["scan", "."], dir.path());
     assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
     let out = stdout(&o);
+    // a.png and its exact copy tie on everything: the first path wins.
     assert!(
-        out.starts_with("Group 1 (4 images; keep: the most pixels)"),
+        out.starts_with(
+            "Group 1 (4 images; keep: the same pixels and bytes as another, the first by path)"
+        ),
         "{out}"
     );
     let keep = out.lines().find(|l| l.starts_with("  keep")).unwrap();
-    // a.png and sub/a-copy.png tie on pixels and bytes: the first path wins.
     assert!(keep.contains("./a.png"), "{keep}");
     assert!(out.contains("identical file"), "{out}");
     assert!(
@@ -98,7 +100,7 @@ fn json_has_groups_and_skipped_files() {
         &["scan", ".", "--json", "--level", "strict"],
         dir.path(),
     ));
-    assert!(out.starts_with("{\"thresholds\":{\"dhash\":3,\"phash\":4},\"scanned\":7,\"groups\":[{\"keepReason\":\"largest\""), "{out}");
+    assert!(out.starts_with("{\"thresholds\":{\"dhash\":4,\"phash\":4},\"scanned\":7,\"groups\":[{\"keepReason\":\"firstPath\""), "{out}");
     assert!(out.contains("\"identical\":true"), "{out}");
     assert!(
         out.contains("\"skipped\":[{\"path\":\"./broken.jpg\""),
@@ -184,4 +186,84 @@ fn missing_paths_are_errors() {
     let o = dupsight(&["scan", "nope"], dir.path());
     assert_eq!(o.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&o.stderr).starts_with("dupsight: nope:"));
+}
+
+#[test]
+fn a_file_named_twice_is_scanned_once() {
+    let dir = folder();
+    let out = stdout(&dupsight(
+        &["scan", "c.png", "./c.png", "sub/../c.png"],
+        dir.path(),
+    ));
+    assert!(out.starts_with("0 groups"), "{out}");
+    assert!(out.contains("1 image scanned"), "{out}");
+    // Overlapping folders, too.
+    let out = stdout(&dupsight(&["scan", ".", "sub", "./sub/"], dir.path()));
+    assert!(out.contains("7 images scanned"), "{out}");
+}
+
+#[test]
+fn the_html_report_never_replaces_a_scanned_file() {
+    let dir = folder();
+    let before = std::fs::read(dir.path().join("c.png")).unwrap();
+    let o = dupsight(&["scan", ".", "--html", "c.png"], dir.path());
+    assert_eq!(o.status.code(), Some(2));
+    #[cfg(unix)]
+    {
+        std::fs::hard_link(dir.path().join("c.png"), dir.path().join("c.html")).unwrap();
+        let o = dupsight(&["scan", ".", "--html", "c.html"], dir.path());
+        assert_eq!(
+            o.status.code(),
+            Some(2),
+            "{}",
+            String::from_utf8_lossy(&o.stderr)
+        );
+        assert!(String::from_utf8_lossy(&o.stderr).contains("one of the scanned files"));
+    }
+    assert_eq!(std::fs::read(dir.path().join("c.png")).unwrap(), before);
+}
+
+#[test]
+fn extras_still_tell_about_skipped_files() {
+    let dir = folder();
+    let o = dupsight(&["scan", ".", "--extras"], dir.path());
+    assert!(o.status.success());
+    assert!(String::from_utf8_lossy(&o.stderr).contains("skipped ./broken.jpg"));
+}
+
+#[test]
+fn nothing_readable_is_an_error() {
+    let dir = folder();
+    let o = dupsight(&["scan", "broken.jpg", "--check"], dir.path());
+    assert_eq!(o.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&o.stderr).contains("none of the files could be read"));
+}
+
+#[test]
+fn control_characters_in_names_are_escaped() {
+    let dir = folder();
+    std::fs::write(dir.path().join("red\x1b[31m.jpg"), b"nope").unwrap();
+    let o = dupsight(&["scan", "."], dir.path());
+    assert!(!o.stdout.contains(&0x1b), "stdout carries a raw escape");
+    assert!(stdout(&o).contains("red\\u{1b}[31m.jpg"), "{}", stdout(&o));
+    let o = dupsight(&["scan", "gone\x1b[31m.png"], dir.path());
+    assert!(!o.stderr.contains(&0x1b), "stderr carries a raw escape");
+}
+
+#[test]
+fn exif_orientation_is_applied() {
+    let dir = folder();
+    let d = picture(9, 600, 400);
+    // Stored sideways with a tag saying "turn 90 degrees clockwise" (6),
+    // next to a copy with the turn baked into its pixels.
+    std::fs::write(
+        dir.path().join("d-tagged.jpg"),
+        jpeg_with_orientation(&d.rotate270(), 6),
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("d.png"), png(&d)).unwrap();
+    let out = stdout(&dupsight(&["scan", "d-tagged.jpg", "d.png"], dir.path()));
+    assert!(out.starts_with("Group 1 (2 images"), "{out}");
+    // Shown as seen: 600x400, not the stored 400x600.
+    assert!(!out.contains("400x600"), "{out}");
 }
