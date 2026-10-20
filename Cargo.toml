@@ -1,0 +1,43 @@
+[package]
+name = "dupsight"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+license = "MIT"
+description = "Find near-duplicate images in folders: resized, recompressed or lightly edited copies grouped by perceptual hashes (dHash and pHash), with the file to keep suggested. Reports only; never deletes. Rust CLI."
+authors = ["printemps.tokyo <develop@printemps.tokyo>"]
+repository = "https://github.com/printemps-tokyo/dupsight"
+homepage = "https://github.com/printemps-tokyo/dupsight"
+readme = "README.md"
+keywords = ["duplicates", "image", "perceptual-hash", "phash", "cli"]
+categories = ["command-line-utilities", "multimedia::images"]
+
+[[bin]]
+name = "dupsight"
+path = "src/main.rs"
+
+[lib]
+name = "dupsight"
+path = "src/lib.rs"
+
+[dependencies]
+# Error context for the thin binary layer (org convention).
+anyhow = "1"
+# Argument parsing (derive API, org convention).
+clap = { version = "4", features = ["derive"] }
+# Decoding only, for the formats photos and web images come in. The hashes
+# (dHash, pHash with its DCT) are implemented in this crate.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif", "bmp", "tiff"] }
+# Walking folders, the same crate other printemps-tokyo tools use.
+ignore = "0.4"
+# Decoding and hashing images in parallel: decoding dominates the run time.
+rayon = "1"
+
+[dev-dependencies]
+# Scratch directories for the CLI integration tests.
+tempfile = "3"
+
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1
