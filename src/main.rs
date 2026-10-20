@@ -1,4 +1,4 @@
-use std::io::{Read, Write};
+use std::io::{Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -155,39 +155,42 @@ fn check_report_path(path: &Path) -> Result<bool> {
     }
 }
 
-/// Write the page to a new temporary file next to `path`, then put it in
-/// place without writing through a link: as a new name when `path` did not
-/// exist (refused if something appeared there meanwhile), or by renaming
-/// over an earlier report, checked again just before.
+/// Write the page without ever clobbering another file: a new report is
+/// created only if nothing is at `path` (atomically); an earlier report is
+/// opened, checked through that same handle to be a report, and only then
+/// emptied and rewritten, so whatever happens to the name meanwhile, the
+/// only file written to is one that was a report.
 fn write_report(path: &Path, page: &str, replace: bool) -> std::io::Result<()> {
-    let name = path.file_name().unwrap_or_default().to_string_lossy();
-    let tmp = path.with_file_name(format!(".{name}.dupsight-{}.tmp", std::process::id()));
-    // Only a file made here is ever removed.
-    let mut f = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&tmp)?;
     let changed = || std::io::Error::other("it changed during the scan; nothing was written");
-    let placed = f.write_all(page.as_bytes()).and_then(|()| {
-        drop(f);
-        if replace {
-            if !is_report(path) {
-                return Err(changed());
-            }
-            return std::fs::rename(&tmp, path);
+    let mut f = if replace {
+        let mut f = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)?;
+        let mut head = vec![0u8; report::HTML_MARK.len()];
+        if !f.metadata()?.is_file()
+            || f.read_exact(&mut head).is_err()
+            || head != report::HTML_MARK.as_bytes()
+        {
+            return Err(changed());
         }
-        match std::fs::hard_link(&tmp, path) {
-            Ok(()) => std::fs::remove_file(&tmp),
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err(changed()),
-            // A file system without hard links: rename, if still nothing is there.
-            Err(_) if std::fs::symlink_metadata(path).is_err() => std::fs::rename(&tmp, path),
-            Err(_) => Err(changed()),
-        }
-    });
-    if placed.is_err() {
-        let _ = std::fs::remove_file(&tmp);
-    }
-    placed
+        f.set_len(0)?;
+        f.seek(std::io::SeekFrom::Start(0))?;
+        f
+    } else {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .map_err(|e| {
+                if e.kind() == std::io::ErrorKind::AlreadyExists {
+                    changed()
+                } else {
+                    e
+                }
+            })?
+    };
+    f.write_all(page.as_bytes())
 }
 
 fn run(cli: Cli) -> Result<ExitCode> {

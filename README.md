@@ -174,8 +174,9 @@ turns the file into the kept one: 0 as it is, 1-3 that many quarter turns
 clockwise, 4-7 the same followed by a left-right mirror.
 
 The HTML page loads the images from their files through `file://` links, so
-open it on the same computer. dupsight writes it to a new file, or replaces an
-earlier dupsight report of the same name; it refuses any other existing file,
+open it on the same computer. dupsight writes it to a new file, or over an
+earlier dupsight report of the same name (checked through the open file, so
+nothing else is ever written to); it refuses any other existing file,
 including a link, and any name with an image extension.
 
 JSON paths are text: in the rare file name that is not valid UTF-8, the

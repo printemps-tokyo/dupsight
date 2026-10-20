@@ -238,3 +238,28 @@ fn deep_images_read_like_8_bit_ones() {
         .iter()
         .all(|&v| (v - 255.0).abs() < 0.01));
 }
+
+#[test]
+fn deep_pixels_keep_their_detail() {
+    // 1000 and 1100 of 65535 are both 4 of 255 in 8 bits; read directly,
+    // the two halves stay apart.
+    let img = DynamicImage::ImageLuma16(ImageBuffer::from_fn(64, 8, |x, _| {
+        Luma([if x < 32 { 1000u16 } else { 1100 }])
+    }));
+    let g = thumbnail(&img);
+    let (left, right) = (g.px[0], g.px[63]);
+    assert!((left - 1000.0 * 255.0 / 65535.0).abs() < 0.001, "{left}");
+    assert!((right - 1100.0 * 255.0 / 65535.0).abs() < 0.001, "{right}");
+    // Half-transparent black over white is mid gray.
+    let half = DynamicImage::ImageLumaA16(ImageBuffer::from_pixel(4, 4, image::LumaA([0, 32768])));
+    let v = thumbnail(&half).px[0];
+    assert!((v - 255.0 * (1.0 - 32768.0 / 65535.0)).abs() < 0.01, "{v}");
+    // Float values in between 8-bit steps, too.
+    let f = DynamicImage::ImageRgb32F(image::ImageBuffer::from_pixel(
+        4,
+        4,
+        image::Rgb([0.0101f32; 3]),
+    ));
+    let v = thumbnail(&f).px[0];
+    assert!((v - 0.0101 * 255.0).abs() < 0.001, "{v}");
+}
