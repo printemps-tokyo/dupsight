@@ -228,11 +228,19 @@ fn the_html_report_only_replaces_an_earlier_report() {
         refused("soft.html");
     }
     assert_eq!(std::fs::read(d.join("c.png")).unwrap(), before);
-    // A new report, then the same name again.
-    for _ in 0..2 {
-        let o = dupsight(&["scan", ".", "--html", "report.html"], d);
+    // A new report, then a shorter one over it: the file is exactly the
+    // second page, nothing left over from the first.
+    for args in [&["."][..], &["c.png", "b.png"][..]] {
+        let mut all = vec!["scan"];
+        all.extend_from_slice(args);
+        all.extend_from_slice(&["--html", "report.html"]);
+        let o = dupsight(&all, d);
         assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
     }
+    let page = std::fs::read_to_string(d.join("report.html")).unwrap();
+    assert!(page.starts_with("<!doctype html>\n<!-- dupsight report -->\n"));
+    assert!(page.contains("<h1>dupsight: 0 groups</h1>"), "{page}");
+    assert!(page.ends_with("</body></html>\n") && page.matches("<!doctype").count() == 1);
     let names: Vec<String> = std::fs::read_dir(d)
         .unwrap()
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
