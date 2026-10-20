@@ -161,7 +161,7 @@ fn exif_orientations_map_to_the_same_turns() {
 fn thumbnail_is_an_area_average_at_any_size() {
     // Two 64-wide halves of different gray, any size: the thumbnail's left
     // half is the one gray and its right half the other.
-    for (w, h) in [(640, 480), (65, 7), (10, 10), (3000, 2)] {
+    for (w, h) in [(640, 480), (65, 7), (10, 10), (3000, 2), (2_000_000, 1)] {
         let img = DynamicImage::ImageLuma8(ImageBuffer::from_fn(w, h, |x, _| {
             Luma([if x < w / 2 { 40 } else { 200 }])
         }));

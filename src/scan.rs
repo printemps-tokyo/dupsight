@@ -122,6 +122,14 @@ pub fn load(path: &Path, orientations: bool) -> Result<Image, String> {
         .format()
         .map_or("unknown".to_string(), |f| format!("{f:?}").to_lowercase());
     let mut decoder = reader.into_decoder().map_err(|e| e.to_string())?;
+    // The size check that ImageReader::decode makes, kept here because the
+    // decoder is needed for its orientation: refuse a picture whose pixels
+    // would not fit in the allocation limit before allocating them.
+    let mut limits = image::Limits::default();
+    limits
+        .reserve(decoder.total_bytes())
+        .map_err(|e| e.to_string())?;
+    decoder.set_limits(limits).map_err(|e| e.to_string())?;
     let turn = decoder.orientation().map_or(0, exif_turn);
     let img = DynamicImage::from_decoder(decoder).map_err(|e| e.to_string())?;
     if img.width() == 0 || img.height() == 0 {

@@ -253,11 +253,15 @@ pub fn file_url(p: &Path) -> String {
     out
 }
 
+/// How every report page starts; an existing file is only replaced when it
+/// starts like this.
+pub const HTML_MARK: &str = "<!doctype html>\n<!-- dupsight report -->\n";
+
 /// A self-contained page showing each group side by side, the images loaded
 /// from their files (open it on the same machine).
 pub fn html(images: &[Image], groups: &[Group]) -> String {
     let mut s = String::from(
-        "<!doctype html>\n<html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
+        "<!doctype html>\n<!-- dupsight report -->\n<html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
          <title>dupsight report</title><style>\
          :root{--bg:#fafaf8;--card:#fff;--text:#1d1d1f;--muted:#666;--line:#e3e1dc;--keep:#2e7d32}\
          @media (prefers-color-scheme: dark){:root{--bg:#16171a;--card:#202226;--text:#ececec;--muted:#a3a7ae;--line:#33363c;--keep:#7ccf82}}\

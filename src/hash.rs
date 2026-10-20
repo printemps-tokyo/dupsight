@@ -61,41 +61,37 @@ pub fn resample(src: &[f32], w: usize, h: usize, nw: usize, nh: usize) -> Vec<f3
     out
 }
 
-/// For each source index of a `w`-long axis, the target cells of an
-/// `n`-long axis it overlaps and by how much (in target cells; each target
-/// cell's weights add up to 1).
-fn spans(w: usize, n: usize) -> Vec<Vec<(usize, f64)>> {
+/// Calls `f(target, weight)` for each cell of an `n`-long axis that source
+/// index `x` of a `w`-long axis overlaps, the weight in target cells (each
+/// target cell's weights add up to 1).
+fn span(x: usize, w: usize, n: usize, mut f: impl FnMut(usize, f64)) {
     let scale = n as f64 / w as f64;
-    (0..w)
-        .map(|x| {
-            let (a, b) = (x as f64 * scale, (x + 1) as f64 * scale);
-            (a.floor() as usize..(b.ceil() as usize).min(n))
-                .map(|t| (t, b.min(t as f64 + 1.0) - a.max(t as f64)))
-                .filter(|&(_, wt)| wt > 0.0)
-                .collect()
-        })
-        .collect()
+    let (a, b) = (x as f64 * scale, (x + 1) as f64 * scale);
+    for t in a.floor() as usize..(b.ceil() as usize).min(n) {
+        let wt = b.min(t as f64 + 1.0) - a.max(t as f64);
+        if wt > 0.0 {
+            f(t, wt);
+        }
+    }
 }
 
 /// Area average of a w x h image, given pixel by pixel, down (or up) to the
-/// thumbnail, in one pass and without a copy of the image.
+/// thumbnail, in one pass, without a copy of the image and with memory that
+/// does not grow with its size.
 fn area_average(w: usize, h: usize, mut pixel: impl FnMut(usize, usize) -> f32) -> Gray {
-    let (xs, ys) = (spans(w, THUMB), spans(h, THUMB));
     let mut acc = vec![0f64; THUMB * THUMB];
     let mut row = [0f64; THUMB];
-    for (y, yspan) in ys.iter().enumerate() {
+    for y in 0..h {
         row.fill(0.0);
-        for (x, xspan) in xs.iter().enumerate() {
+        for x in 0..w {
             let v = pixel(x, y) as f64;
-            for &(t, wt) in xspan {
-                row[t] += v * wt;
-            }
+            span(x, w, THUMB, |t, wt| row[t] += v * wt);
         }
-        for &(ty, wy) in yspan {
+        span(y, h, THUMB, |ty, wy| {
             for (a, r) in acc[ty * THUMB..(ty + 1) * THUMB].iter_mut().zip(&row) {
                 *a += r * wy;
             }
-        }
+        });
     }
     Gray {
         side: THUMB,

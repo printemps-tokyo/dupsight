@@ -203,24 +203,41 @@ fn a_file_named_twice_is_scanned_once() {
 }
 
 #[test]
-fn the_html_report_never_replaces_a_scanned_file() {
+fn the_html_report_only_replaces_an_earlier_report() {
     let dir = folder();
-    let before = std::fs::read(dir.path().join("c.png")).unwrap();
-    let o = dupsight(&["scan", ".", "--html", "c.png"], dir.path());
-    assert_eq!(o.status.code(), Some(2));
+    let d = dir.path();
+    let before = std::fs::read(d.join("c.png")).unwrap();
+    let refused = |name: &str| {
+        let o = dupsight(&["scan", "b.png", "--html", name], d);
+        assert_eq!(o.status.code(), Some(2), "{name}");
+        String::from_utf8_lossy(&o.stderr).into_owned()
+    };
+    assert!(refused("c.png").contains("not an image's"));
+    std::fs::write(d.join("notes.html"), "my notes").unwrap();
+    assert!(refused("notes.html").contains("not an earlier dupsight report"));
+    assert_eq!(
+        std::fs::read_to_string(d.join("notes.html")).unwrap(),
+        "my notes"
+    );
     #[cfg(unix)]
     {
-        std::fs::hard_link(dir.path().join("c.png"), dir.path().join("c.html")).unwrap();
-        let o = dupsight(&["scan", ".", "--html", "c.html"], dir.path());
-        assert_eq!(
-            o.status.code(),
-            Some(2),
-            "{}",
-            String::from_utf8_lossy(&o.stderr)
-        );
-        assert!(String::from_utf8_lossy(&o.stderr).contains("one of the scanned files"));
+        // Links to a picture, scanned or not, are refused too.
+        std::fs::hard_link(d.join("c.png"), d.join("hard.html")).unwrap();
+        std::os::unix::fs::symlink(d.join("c.png"), d.join("soft.html")).unwrap();
+        refused("hard.html");
+        refused("soft.html");
     }
-    assert_eq!(std::fs::read(dir.path().join("c.png")).unwrap(), before);
+    assert_eq!(std::fs::read(d.join("c.png")).unwrap(), before);
+    // A new report, then the same name again.
+    for _ in 0..2 {
+        let o = dupsight(&["scan", ".", "--html", "report.html"], d);
+        assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    }
+    let names: Vec<String> = std::fs::read_dir(d)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(!names.iter().any(|n| n.ends_with(".tmp")), "{names:?}");
 }
 
 #[test]
@@ -266,4 +283,55 @@ fn exif_orientation_is_applied() {
     assert!(out.starts_with("Group 1 (2 images"), "{out}");
     // Shown as seen: 600x400, not the stored 400x600.
     assert!(!out.contains("400x600"), "{out}");
+}
+
+/// A PNG claiming `w` x `h` RGBA pixels, with only a few bytes of data.
+fn png_claiming(w: u32, h: u32) -> Vec<u8> {
+    fn crc(data: &[u8]) -> u32 {
+        let mut c = !0u32;
+        for &b in data {
+            c ^= b as u32;
+            for _ in 0..8 {
+                c = if c & 1 == 1 {
+                    0xedb8_8320 ^ (c >> 1)
+                } else {
+                    c >> 1
+                };
+            }
+        }
+        !c
+    }
+    fn chunk(out: &mut Vec<u8>, kind: &[u8], data: &[u8]) {
+        let mut body = kind.to_vec();
+        body.extend_from_slice(data);
+        out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+        out.extend_from_slice(&body);
+        out.extend_from_slice(&crc(&body).to_be_bytes());
+    }
+    let mut ihdr = w.to_be_bytes().to_vec();
+    ihdr.extend_from_slice(&h.to_be_bytes());
+    ihdr.extend_from_slice(&[8, 6, 0, 0, 0]);
+    // A zlib stream holding one stored block of 64 zero bytes.
+    let mut idat = vec![0x78, 0x01, 0x01, 64, 0, !64, 0xff];
+    idat.extend_from_slice(&[0; 64]);
+    idat.extend_from_slice(&65u32.to_be_bytes()); // Adler-32 of 64 zeros
+    let mut out = b"\x89PNG\r\n\x1a\n".to_vec();
+    chunk(&mut out, b"IHDR", &ihdr);
+    chunk(&mut out, b"IDAT", &idat);
+    chunk(&mut out, b"IEND", &[]);
+    out
+}
+
+#[test]
+fn a_picture_too_large_to_decode_is_skipped_before_allocating() {
+    let dir = folder();
+    // 40000 x 40000 RGBA would need 6.4 GB.
+    std::fs::write(dir.path().join("huge.png"), png_claiming(40_000, 40_000)).unwrap();
+    let o = dupsight(&["scan", "huge.png", "c.png"], dir.path());
+    let out = stdout(&o);
+    let line = out
+        .lines()
+        .find(|l| l.contains("skipped huge.png"))
+        .unwrap();
+    assert!(line.contains("Memory limit exceeded"), "{line}");
 }

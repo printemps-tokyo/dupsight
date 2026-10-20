@@ -5,11 +5,12 @@ recompressed, brightened, converted to another format or, with `--rotations`,
 turned or mirrored. dupsight groups them, suggests the file to keep, and shows
 each group side by side in an HTML page.
 
-dupsight only reports. It never deletes, moves or changes a file.
+dupsight only reports. It never deletes, moves or changes the images it scans;
+the only file it writes is the HTML report, when you ask for one.
 
 ```
-$ dupsight scan ~/Pictures/trip
-Group 1 (3 images; keep: the most pixels)
+$ dupsight scan trip
+Group 1 (3 images; keep: the same pixels and bytes as another, the first by path)
   keep  trip/IMG_2041.jpg          4032x3024    3.1 MB  jpeg
         trip/IMG_2041 (1).jpg      4032x3024    3.1 MB  jpeg  identical file
         trip/shared/IMG_2041.jpg   1600x1200    412 KB  jpeg  dHash  1  pHash  0
@@ -152,7 +153,7 @@ such folders, and look at the HTML report before removing anything.
 
 ```json
 {
-  "thresholds": {"dhash": 8, "phash": 10},
+  "thresholds": {"dhash": 8, "phash": 7},
   "scanned": 214,
   "groups": [
     {
@@ -173,8 +174,9 @@ turns the file into the kept one: 0 as it is, 1-3 that many quarter turns
 clockwise, 4-7 the same followed by a left-right mirror.
 
 The HTML page loads the images from their files through `file://` links, so
-open it on the same computer. dupsight refuses to write it over a file with an
-image extension or over any of the files being scanned.
+open it on the same computer. dupsight writes it to a new file, or replaces an
+earlier dupsight report of the same name; it refuses any other existing file,
+including a link, and any name with an image extension.
 
 JSON paths are text: in the rare file name that is not valid UTF-8, the
 invalid bytes are replaced. Use `--extras -0` when you need exact paths.
@@ -182,8 +184,8 @@ invalid bytes are replaced. Use `--extras -0` when you need exact paths.
 ### Memory
 
 Each image is decoded whole, then reduced to its thumbnail and let go. One
-image is decoded per CPU at a time, each allowed up to 512 MiB (the image
-crate's default limit; a larger one is skipped). On a machine with many CPUs
+image is decoded per CPU at a time, each allowed up to 512 MiB of pixels (the
+image crate's default limit; a larger one is skipped before it is decoded). On a machine with many CPUs
 and very large images, `--jobs` lowers how many are decoded at once.
 
 Exit status: 0 when done, 1 when `--check` found a group (or, for `compare`,

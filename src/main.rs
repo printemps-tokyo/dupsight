@@ -1,5 +1,5 @@
-use std::io::Write;
-use std::path::PathBuf;
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use anyhow::{bail, Context, Result};
@@ -124,6 +124,52 @@ struct CompareArgs {
     matching: Match,
 }
 
+/// The HTML report may only create a new file or replace an earlier report:
+/// never a picture, a link, or any other file.
+fn check_report_path(path: &Path) -> Result<()> {
+    if scan::is_image(path) {
+        bail!(
+            "{}: the report needs a name that is not an image's (such as report.html)",
+            report::shown(path)
+        );
+    }
+    let meta = match std::fs::symlink_metadata(path) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => bail!("{}: {e}", report::shown(path)),
+    };
+    let mut head = vec![0u8; report::HTML_MARK.len()];
+    let is_report = meta.file_type().is_file()
+        && std::fs::File::open(path)
+            .and_then(|mut f| f.read_exact(&mut head))
+            .is_ok()
+        && head == report::HTML_MARK.as_bytes();
+    if !is_report {
+        bail!(
+            "{}: exists and is not an earlier dupsight report; choose another name",
+            report::shown(path)
+        );
+    }
+    Ok(())
+}
+
+/// Write to a new file next to `path`, then rename it into place, so the
+/// directory entry is replaced and a link's target is never written through.
+fn write_report(path: &Path, page: &str) -> std::io::Result<()> {
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    let tmp = path.with_file_name(format!(".{name}.dupsight-{}.tmp", std::process::id()));
+    let result = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&tmp)
+        .and_then(|mut f| f.write_all(page.as_bytes()))
+        .and_then(|()| std::fs::rename(&tmp, path));
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
+}
+
 fn run(cli: Cli) -> Result<ExitCode> {
     let mut out = std::io::stdout().lock();
     match cli.command {
@@ -138,23 +184,13 @@ fn run(cli: Cli) -> Result<ExitCode> {
             let (files, mut skipped) =
                 scan::find(&a.paths, a.hidden).map_err(anyhow::Error::msg)?;
             if let Some(path) = &a.html {
-                // The report must never land on a picture being scanned.
-                if scan::is_image(path) {
-                    bail!(
-                        "{}: the report needs a name that is not an image's (such as report.html)",
-                        report::shown(path)
-                    );
-                }
-                let key = scan::file_key(path);
-                if key.is_some() && files.iter().any(|f| scan::file_key(f) == key) {
-                    bail!("{}: this is one of the scanned files", report::shown(path));
-                }
+                check_report_path(path)?;
             }
             let (images, unread) = scan::scan(&files, a.matching.rotations);
             skipped.extend(unread);
             let found = groups(&images, t);
             if let Some(path) = &a.html {
-                std::fs::write(path, report::html(&images, &found))
+                write_report(path, &report::html(&images, &found))
                     .with_context(|| format!("cannot write {}", report::shown(path)))?;
             }
             if a.extras {
