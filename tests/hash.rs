@@ -202,3 +202,39 @@ fn color_under_transparency_does_not_count() {
     let b = thumbnail(&DynamicImage::ImageRgba8(flat));
     assert!(close(&a, &b));
 }
+
+#[test]
+fn deep_images_read_like_8_bit_ones() {
+    let base = picture(6, 120, 90);
+    let g8 = thumbnail(&base);
+    let rgba = base.to_rgba8();
+    let rgba16 = image::ImageBuffer::<image::Rgba<u16>, _>::from_fn(120, 90, |x, y| {
+        let p = rgba.get_pixel(x, y).0;
+        image::Rgba(p.map(|v| v as u16 * 257))
+    });
+    let deep = [
+        DynamicImage::ImageRgba16(rgba16),
+        DynamicImage::ImageRgb16(base.to_rgb16()),
+        DynamicImage::ImageRgb32F(base.to_rgb32f()),
+        DynamicImage::ImageRgba32F(base.to_rgba32f()),
+    ];
+    for img in &deep {
+        let g = thumbnail(img);
+        let worst =
+            g.px.iter()
+                .zip(&g8.px)
+                .map(|(a, b)| (a - b).abs())
+                .fold(0.0, f32::max);
+        assert!(worst < 0.01, "{:?}: {worst}", img.color());
+    }
+    let gray = DynamicImage::ImageLuma8(base.to_luma8());
+    let gray16 = DynamicImage::ImageLuma16(gray.to_luma16());
+    let (a, b) = (thumbnail(&gray), thumbnail(&gray16));
+    assert!(a.px.iter().zip(&b.px).all(|(x, y)| (x - y).abs() < 0.01));
+    // Transparent 16-bit pixels count as white.
+    let clear = DynamicImage::ImageLumaA16(ImageBuffer::from_pixel(9, 9, image::LumaA([0, 0])));
+    assert!(thumbnail(&clear)
+        .px
+        .iter()
+        .all(|&v| (v - 255.0).abs() < 0.01));
+}

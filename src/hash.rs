@@ -30,11 +30,22 @@ pub struct Hashes {
     pub phash: Vec<u64>,
 }
 
-/// Luma (ITU-R BT.601 weights) of a pixel laid over white.
-fn luma_over_white(p: [u8; 4]) -> f32 {
-    let a = p[3] as f32 / 255.0;
-    let c = |v: u8| v as f32 * a + 255.0 * (1.0 - a);
-    0.299 * c(p[0]) + 0.587 * c(p[1]) + 0.114 * c(p[2])
+/// Luma (ITU-R BT.601 weights), 0-255, of a pixel laid over white; the
+/// channels and alpha are 0-1.
+fn luma_over_white(r: f32, g: f32, b: f32, a: f32) -> f32 {
+    let a = a.clamp(0.0, 1.0);
+    let c = |v: f32| v.clamp(0.0, 1.0) * a + (1.0 - a);
+    255.0 * (0.299 * c(r) + 0.587 * c(g) + 0.114 * c(b))
+}
+
+fn luma8(p: [u8; 4]) -> f32 {
+    let f = |v: u8| v as f32 / 255.0;
+    luma_over_white(f(p[0]), f(p[1]), f(p[2]), f(p[3]))
+}
+
+fn luma16(p: [u16; 4]) -> f32 {
+    let f = |v: u16| v as f32 / 65535.0;
+    luma_over_white(f(p[0]), f(p[1]), f(p[2]), f(p[3]))
 }
 
 /// Area-average resampling of a w x h grid to nw x nh: every source pixel
@@ -103,28 +114,43 @@ fn area_average(w: usize, h: usize, mut pixel: impl FnMut(usize, usize) -> f32) 
 /// first, then averaged by area, so color hidden under transparent pixels
 /// does not count.
 pub fn thumbnail(img: &DynamicImage) -> Gray {
+    use DynamicImage as D;
     let (w, h) = (img.width() as usize, img.height() as usize);
     match img {
-        DynamicImage::ImageRgb8(b) => area_average(w, h, |x, y| {
-            let p = b.get_pixel(x as u32, y as u32).0;
-            luma_over_white([p[0], p[1], p[2], 255])
+        D::ImageRgb8(b) => area_average(w, h, |x, y| {
+            let [r, g, bl] = b.get_pixel(x as u32, y as u32).0;
+            luma8([r, g, bl, 255])
         }),
-        DynamicImage::ImageRgba8(b) => area_average(w, h, |x, y| {
-            luma_over_white(b.get_pixel(x as u32, y as u32).0)
-        }),
-        DynamicImage::ImageLuma8(b) => {
-            area_average(w, h, |x, y| b.get_pixel(x as u32, y as u32).0[0] as f32)
-        }
-        DynamicImage::ImageLumaA8(b) => area_average(w, h, |x, y| {
+        D::ImageRgba8(b) => area_average(w, h, |x, y| luma8(b.get_pixel(x as u32, y as u32).0)),
+        D::ImageLuma8(b) => area_average(w, h, |x, y| b.get_pixel(x as u32, y as u32).0[0] as f32),
+        D::ImageLumaA8(b) => area_average(w, h, |x, y| {
             let [l, a] = b.get_pixel(x as u32, y as u32).0;
-            luma_over_white([l, l, l, a])
+            luma8([l, l, l, a])
         }),
-        // 16-bit and float images: brought to 8 bits per channel first.
+        D::ImageRgb16(b) => area_average(w, h, |x, y| {
+            let [r, g, bl] = b.get_pixel(x as u32, y as u32).0;
+            luma16([r, g, bl, u16::MAX])
+        }),
+        D::ImageRgba16(b) => area_average(w, h, |x, y| luma16(b.get_pixel(x as u32, y as u32).0)),
+        D::ImageLuma16(b) => area_average(w, h, |x, y| {
+            b.get_pixel(x as u32, y as u32).0[0] as f32 * 255.0 / 65535.0
+        }),
+        D::ImageLumaA16(b) => area_average(w, h, |x, y| {
+            let [l, a] = b.get_pixel(x as u32, y as u32).0;
+            luma16([l, l, l, a])
+        }),
+        D::ImageRgb32F(b) => area_average(w, h, |x, y| {
+            let [r, g, bl] = b.get_pixel(x as u32, y as u32).0;
+            luma_over_white(r, g, bl, 1.0)
+        }),
+        D::ImageRgba32F(b) => area_average(w, h, |x, y| {
+            let [r, g, bl, a] = b.get_pixel(x as u32, y as u32).0;
+            luma_over_white(r, g, bl, a)
+        }),
+        // Kinds added to the image crate later: brought to 8 bits first.
         other => {
             let b = other.to_rgba8();
-            area_average(w, h, |x, y| {
-                luma_over_white(b.get_pixel(x as u32, y as u32).0)
-            })
+            area_average(w, h, |x, y| luma8(b.get_pixel(x as u32, y as u32).0))
         }
     }
 }

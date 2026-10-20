@@ -12,7 +12,7 @@ the only file it writes is the HTML report, when you ask for one.
 $ dupsight scan trip
 Group 1 (3 images; keep: the same pixels and bytes as another, the first by path)
   keep  trip/IMG_2041.jpg          4032x3024    3.1 MB  jpeg
-        trip/IMG_2041 (1).jpg      4032x3024    3.1 MB  jpeg  identical file
+        trip/backup/IMG_2041.jpg   4032x3024    3.1 MB  jpeg  identical file
         trip/shared/IMG_2041.jpg   1600x1200    412 KB  jpeg  dHash  1  pHash  0
 
 Group 2 (2 images; keep: as many pixels as another, but a larger file)

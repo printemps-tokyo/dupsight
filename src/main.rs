@@ -124,50 +124,70 @@ struct CompareArgs {
     matching: Match,
 }
 
+/// Whether `path` is a regular file (not a link) that starts like a
+/// dupsight report.
+fn is_report(path: &Path) -> bool {
+    let mut head = vec![0u8; report::HTML_MARK.len()];
+    std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_file())
+        && std::fs::File::open(path)
+            .and_then(|mut f| f.read_exact(&mut head))
+            .is_ok()
+        && head == report::HTML_MARK.as_bytes()
+}
+
 /// The HTML report may only create a new file or replace an earlier report:
-/// never a picture, a link, or any other file.
-fn check_report_path(path: &Path) -> Result<()> {
+/// never a picture, a link, or any other file. Returns whether it exists.
+fn check_report_path(path: &Path) -> Result<bool> {
     if scan::is_image(path) {
         bail!(
             "{}: the report needs a name that is not an image's (such as report.html)",
             report::shown(path)
         );
     }
-    let meta = match std::fs::symlink_metadata(path) {
-        Ok(m) => m,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+    match std::fs::symlink_metadata(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
         Err(e) => bail!("{}: {e}", report::shown(path)),
-    };
-    let mut head = vec![0u8; report::HTML_MARK.len()];
-    let is_report = meta.file_type().is_file()
-        && std::fs::File::open(path)
-            .and_then(|mut f| f.read_exact(&mut head))
-            .is_ok()
-        && head == report::HTML_MARK.as_bytes();
-    if !is_report {
-        bail!(
+        Ok(_) if is_report(path) => Ok(true),
+        Ok(_) => bail!(
             "{}: exists and is not an earlier dupsight report; choose another name",
             report::shown(path)
-        );
+        ),
     }
-    Ok(())
 }
 
-/// Write to a new file next to `path`, then rename it into place, so the
-/// directory entry is replaced and a link's target is never written through.
-fn write_report(path: &Path, page: &str) -> std::io::Result<()> {
+/// Write the page to a new temporary file next to `path`, then put it in
+/// place without writing through a link: as a new name when `path` did not
+/// exist (refused if something appeared there meanwhile), or by renaming
+/// over an earlier report, checked again just before.
+fn write_report(path: &Path, page: &str, replace: bool) -> std::io::Result<()> {
     let name = path.file_name().unwrap_or_default().to_string_lossy();
     let tmp = path.with_file_name(format!(".{name}.dupsight-{}.tmp", std::process::id()));
-    let result = std::fs::OpenOptions::new()
+    // Only a file made here is ever removed.
+    let mut f = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
-        .open(&tmp)
-        .and_then(|mut f| f.write_all(page.as_bytes()))
-        .and_then(|()| std::fs::rename(&tmp, path));
-    if result.is_err() {
+        .open(&tmp)?;
+    let changed = || std::io::Error::other("it changed during the scan; nothing was written");
+    let placed = f.write_all(page.as_bytes()).and_then(|()| {
+        drop(f);
+        if replace {
+            if !is_report(path) {
+                return Err(changed());
+            }
+            return std::fs::rename(&tmp, path);
+        }
+        match std::fs::hard_link(&tmp, path) {
+            Ok(()) => std::fs::remove_file(&tmp),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err(changed()),
+            // A file system without hard links: rename, if still nothing is there.
+            Err(_) if std::fs::symlink_metadata(path).is_err() => std::fs::rename(&tmp, path),
+            Err(_) => Err(changed()),
+        }
+    });
+    if placed.is_err() {
         let _ = std::fs::remove_file(&tmp);
     }
-    result
+    placed
 }
 
 fn run(cli: Cli) -> Result<ExitCode> {
@@ -183,14 +203,15 @@ fn run(cli: Cli) -> Result<ExitCode> {
             }
             let (files, mut skipped) =
                 scan::find(&a.paths, a.hidden).map_err(anyhow::Error::msg)?;
-            if let Some(path) = &a.html {
-                check_report_path(path)?;
-            }
+            let replace = match &a.html {
+                Some(path) => check_report_path(path)?,
+                None => false,
+            };
             let (images, unread) = scan::scan(&files, a.matching.rotations);
             skipped.extend(unread);
             let found = groups(&images, t);
             if let Some(path) = &a.html {
-                write_report(path, &report::html(&images, &found))
+                write_report(path, &report::html(&images, &found), replace)
                     .with_context(|| format!("cannot write {}", report::shown(path)))?;
             }
             if a.extras {

@@ -335,3 +335,16 @@ fn a_picture_too_large_to_decode_is_skipped_before_allocating() {
         .unwrap();
     assert!(line.contains("Memory limit exceeded"), "{line}");
 }
+
+#[cfg(unix)]
+#[test]
+fn hard_links_are_one_file() {
+    let dir = folder();
+    std::fs::hard_link(dir.path().join("c.png"), dir.path().join("c-link.png")).unwrap();
+    let out = stdout(&dupsight(&["scan", "c.png", "c-link.png"], dir.path()));
+    assert!(out.starts_with("0 groups"), "{out}");
+    assert!(out.contains("1 image scanned"), "{out}");
+    let o = dupsight(&["compare", "c.png", "c-link.png"], dir.path());
+    assert_eq!(o.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&o.stderr).contains("the same file"));
+}
