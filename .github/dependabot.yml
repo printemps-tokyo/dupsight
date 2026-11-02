@@ -8,3 +8,8 @@ updates:
     directory: "/"
     schedule:
       interval: weekly
+    ignore:
+      # Its refs are toolchain names (stable, or the MSRV such as 1.88), not
+      # action versions; Dependabot would "bump" the MSRV pin to a Rust
+      # release that does not exist.
+      - dependency-name: "dtolnay/rust-toolchain"
