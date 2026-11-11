@@ -157,16 +157,28 @@ fn check_report_path(path: &Path) -> Result<bool> {
 
 /// Write the page without ever clobbering another file: a new report is
 /// created only if nothing is at `path` (atomically); an earlier report is
-/// opened, checked through that same handle to be a report, and only then
-/// emptied and rewritten, so whatever happens to the name meanwhile, the
-/// only file written to is one that was a report.
+/// opened without following a link, checked through that same handle to be a
+/// report, and only then emptied and rewritten, so whatever happens to the
+/// name meanwhile, the only file written to is the one at that name, and only
+/// if it was a report.
 fn write_report(path: &Path, page: &str, replace: bool) -> std::io::Result<()> {
     let changed = || std::io::Error::other("it changed during the scan; nothing was written");
     let mut f = if replace {
-        let mut f = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(path)?;
+        let mut opts = std::fs::OpenOptions::new();
+        opts.read(true).write(true);
+        // If the report was swapped for a link after the check, opening it
+        // must fail rather than land on (and empty) whatever it points at.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.custom_flags(libc::O_NOFOLLOW);
+        }
+        let mut f = match opts.open(path) {
+            Ok(f) => f,
+            #[cfg(unix)]
+            Err(e) if e.raw_os_error() == Some(libc::ELOOP) => return Err(changed()),
+            Err(e) => return Err(e),
+        };
         let mut head = vec![0u8; report::HTML_MARK.len()];
         if !f.metadata()?.is_file()
             || f.read_exact(&mut head).is_err()
@@ -292,5 +304,28 @@ fn main() -> ExitCode {
             eprintln!("dupsight: {}", report::clean(&format!("{e:#}")));
             ExitCode::from(2)
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_report_swapped_for_a_link_is_not_followed() {
+        let dir = std::env::temp_dir().join(format!("dupsight-swap-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let other = dir.join("other.html");
+        let mine = dir.join("report.html");
+        let old = format!("{}old", report::HTML_MARK);
+        std::fs::write(&other, &old).unwrap();
+        // The check saw a report at `mine`; then the name became a link to
+        // someone else's report before the write.
+        let _ = std::fs::remove_file(&mine);
+        std::os::unix::fs::symlink(&other, &mine).unwrap();
+        let err = write_report(&mine, "new", true).unwrap_err();
+        assert!(err.to_string().contains("changed during the scan"), "{err}");
+        assert_eq!(std::fs::read_to_string(&other).unwrap(), old);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

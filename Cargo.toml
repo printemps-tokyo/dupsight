@@ -1,6 +1,6 @@
 [package]
 name = "dupsight"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 rust-version = "1.88"
 license = "MIT"
@@ -32,6 +32,10 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 ignore = "0.4"
 # Decoding and hashing images in parallel: decoding dominates the run time.
 rayon = "1"
+
+[target.'cfg(unix)'.dependencies]
+# O_NOFOLLOW, so replacing an earlier report never writes through a link.
+libc = "0.2"
 
 [dev-dependencies]
 # Scratch directories for the CLI integration tests.
