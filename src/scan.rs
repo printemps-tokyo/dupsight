@@ -6,6 +6,7 @@ use rayon::prelude::*;
 
 use image::{DynamicImage, ImageDecoder};
 
+use crate::cache::{self, Cache, Entry};
 use crate::hash::{exif_turn, hashes_of, orient, thumbnail, Hashes};
 
 /// Extensions read as images (case does not matter).
@@ -113,9 +114,18 @@ fn error_path(e: &ignore::Error) -> Option<&Path> {
 /// Decode and hash one file, turned the way its Exif orientation says it is
 /// meant to be seen. Width and height are as seen, too.
 pub fn load(path: &Path, orientations: bool) -> Result<Image, String> {
-    let bytes = std::fs::metadata(path).map_err(|e| e.to_string())?.len();
-    let reader = image::ImageReader::open(path)
-        .map_err(|e| e.to_string())?
+    load_stamped(path, orientations).map(|(img, _)| img)
+}
+
+/// `load`, and the cache stamp of the file that was decoded: both come from
+/// one open handle, so they belong to the same file even if the path is
+/// pointed elsewhere meanwhile.
+pub fn load_stamped(path: &Path, orientations: bool) -> Result<(Image, Option<String>), String> {
+    let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+    let meta = file.metadata().map_err(|e| e.to_string())?;
+    let bytes = meta.len();
+    let stamp = cache::stamp_of(&meta);
+    let reader = image::ImageReader::new(std::io::BufReader::new(file))
         .with_guessed_format()
         .map_err(|e| e.to_string())?;
     let format = reader
@@ -146,34 +156,86 @@ pub fn load(path: &Path, orientations: bool) -> Result<Image, String> {
     if turn != 0 {
         g = orient(&g, turn);
     }
-    Ok(Image {
-        path: path.to_path_buf(),
-        width,
-        height,
-        bytes,
-        format,
-        hashes: hashes_of(&g, orientations),
-    })
+    Ok((
+        Image {
+            path: path.to_path_buf(),
+            width,
+            height,
+            bytes,
+            format,
+            hashes: hashes_of(&g, orientations),
+        },
+        stamp,
+    ))
 }
 
 /// Hash every file, in parallel; files that cannot be read are listed apart.
 pub fn scan(files: &[PathBuf], orientations: bool) -> (Vec<Image>, Vec<Skipped>) {
-    let results: Vec<Result<Image, Skipped>> = files
+    let (images, skipped, _) = scan_cached(files, orientations, &mut Cache::default());
+    (images, skipped)
+}
+
+/// Like `scan`, but a file `cache` holds unchanged is taken from it instead
+/// of decoded, and every file hashed now is added to it. Also returns how
+/// many came from the cache.
+pub fn scan_cached(
+    files: &[PathBuf],
+    orientations: bool,
+    cache: &mut Cache,
+) -> (Vec<Image>, Vec<Skipped>, usize) {
+    enum Hashed {
+        Cached(Image),
+        Decoded(Image, Option<(PathBuf, String)>),
+    }
+    let shared: &Cache = cache;
+    let results: Vec<Result<Hashed, Skipped>> = files
         .par_iter()
         .map(|p| {
-            load(p, orientations).map_err(|reason| Skipped {
-                path: p.clone(),
-                reason,
-            })
+            // A hit needs the file the path names now to carry the stamp
+            // its entry was made from.
+            let key = cache::key(p);
+            if let Some((key, stamp)) = key.as_ref().zip(cache::stamp(p)) {
+                if let Some(img) = shared.get(key, &stamp, p, orientations) {
+                    return Ok(Hashed::Cached(img));
+                }
+            }
+            // The stamp stored is the decoded file's own (from its open
+            // handle), so if the path pointed at another file meanwhile,
+            // the entry will not match the file under `key` next time.
+            load_stamped(p, orientations)
+                .map(|(img, stamp)| Hashed::Decoded(img, key.zip(stamp)))
+                .map_err(|reason| Skipped {
+                    path: p.clone(),
+                    reason,
+                })
         })
         .collect();
     let mut images = Vec::new();
     let mut skipped = Vec::new();
+    let mut reused = 0;
     for r in results {
         match r {
-            Ok(i) => images.push(i),
+            Ok(Hashed::Decoded(img, id)) => {
+                if let Some((key, stamp)) = id {
+                    cache.put(
+                        key,
+                        Entry {
+                            stamp,
+                            width: img.width,
+                            height: img.height,
+                            format: img.format.clone(),
+                            hashes: img.hashes.clone(),
+                        },
+                    );
+                }
+                images.push(img);
+            }
+            Ok(Hashed::Cached(img)) => {
+                reused += 1;
+                images.push(img);
+            }
             Err(s) => skipped.push(s),
         }
     }
-    (images, skipped)
+    (images, skipped, reused)
 }

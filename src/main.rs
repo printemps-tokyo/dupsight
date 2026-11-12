@@ -1,10 +1,11 @@
-use std::io::{Read, Seek, Write};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 
+use dupsight::cache::Cache;
 use dupsight::group::{best_match, groups, within, Thresholds};
 use dupsight::report;
 use dupsight::scan;
@@ -108,6 +109,11 @@ struct ScanArgs {
     #[arg(long)]
     check: bool,
 
+    /// Keep the hashes in FILE and reuse them for files that have not
+    /// changed since, so a later scan only decodes new and changed files
+    #[arg(long, value_name = "FILE")]
+    cache: Option<PathBuf>,
+
     /// Images decoded at the same time (default: one per CPU); fewer use less memory
     #[arg(short, long, value_name = "N", value_parser = clap::value_parser!(u16).range(1..))]
     jobs: Option<u16>,
@@ -155,54 +161,10 @@ fn check_report_path(path: &Path) -> Result<bool> {
     }
 }
 
-/// Write the page without ever clobbering another file: a new report is
-/// created only if nothing is at `path` (atomically); an earlier report is
-/// opened without following a link, checked through that same handle to be a
-/// report, and only then emptied and rewritten, so whatever happens to the
-/// name meanwhile, the only file written to is the one at that name, and only
-/// if it was a report.
+/// Write the page without ever clobbering another file (see
+/// `dupsight::write::write_over`).
 fn write_report(path: &Path, page: &str, replace: bool) -> std::io::Result<()> {
-    let changed = || std::io::Error::other("it changed during the scan; nothing was written");
-    let mut f = if replace {
-        let mut opts = std::fs::OpenOptions::new();
-        opts.read(true).write(true);
-        // If the report was swapped for a link after the check, opening it
-        // must fail rather than land on (and empty) whatever it points at.
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            opts.custom_flags(libc::O_NOFOLLOW);
-        }
-        let mut f = match opts.open(path) {
-            Ok(f) => f,
-            #[cfg(unix)]
-            Err(e) if e.raw_os_error() == Some(libc::ELOOP) => return Err(changed()),
-            Err(e) => return Err(e),
-        };
-        let mut head = vec![0u8; report::HTML_MARK.len()];
-        if !f.metadata()?.is_file()
-            || f.read_exact(&mut head).is_err()
-            || head != report::HTML_MARK.as_bytes()
-        {
-            return Err(changed());
-        }
-        f.set_len(0)?;
-        f.seek(std::io::SeekFrom::Start(0))?;
-        f
-    } else {
-        std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(path)
-            .map_err(|e| {
-                if e.kind() == std::io::ErrorKind::AlreadyExists {
-                    changed()
-                } else {
-                    e
-                }
-            })?
-    };
-    f.write_all(page.as_bytes())
+    dupsight::write::write_over(path, page.as_bytes(), replace, report::HTML_MARK.as_bytes())
 }
 
 fn run(cli: Cli) -> Result<ExitCode> {
@@ -218,11 +180,44 @@ fn run(cli: Cli) -> Result<ExitCode> {
             }
             let (files, mut skipped) =
                 scan::find(&a.paths, a.hidden).map_err(anyhow::Error::msg)?;
+            if a.html.is_some() && a.html == a.cache {
+                bail!("--html and --cache need different files");
+            }
             let replace = match &a.html {
                 Some(path) => check_report_path(path)?,
                 None => false,
             };
-            let (images, unread) = scan::scan(&files, a.matching.rotations);
+            let (images, unread) = match &a.cache {
+                None => scan::scan(&files, a.matching.rotations),
+                Some(path) => {
+                    let (mut cache, problem) = Cache::load(path)
+                        .map_err(|e| anyhow::anyhow!("{}: {e}", report::shown(path)))?;
+                    if let Some(why) = problem {
+                        eprintln!(
+                            "dupsight: not using the cache {} ({}); it will be rewritten",
+                            report::shown(path),
+                            report::clean(&why)
+                        );
+                    }
+                    let (images, unread, reused) =
+                        scan::scan_cached(&files, a.matching.rotations, &mut cache);
+                    cache.prune();
+                    // The results do not depend on the cache, so a cache
+                    // that cannot be written is a warning, not a failure.
+                    if let Err(e) = cache.save(path) {
+                        eprintln!(
+                            "dupsight: cannot write the cache {}: {}",
+                            report::shown(path),
+                            report::clean(&e)
+                        );
+                    }
+                    eprintln!(
+                        "dupsight: {reused} of {} images from the cache",
+                        images.len()
+                    );
+                    (images, unread)
+                }
+            };
             skipped.extend(unread);
             let found = groups(&images, t);
             if let Some(path) = &a.html {

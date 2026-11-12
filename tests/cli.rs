@@ -356,3 +356,141 @@ fn hard_links_are_one_file() {
     assert_eq!(o.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&o.stderr).contains("the same file"));
 }
+
+fn stderr(o: &Output) -> String {
+    String::from_utf8(o.stderr.clone()).unwrap()
+}
+
+#[test]
+fn a_cache_gives_the_same_results_without_decoding_again() {
+    let dir = folder();
+    let plain = dupsight(&["scan", "--json", "."], dir.path());
+    let first = dupsight(
+        &["scan", "--json", "--cache", "hashes.cache", "."],
+        dir.path(),
+    );
+    assert_eq!(stdout(&first), stdout(&plain));
+    assert!(
+        stderr(&first).contains("0 of 7 images from the cache"),
+        "{}",
+        stderr(&first)
+    );
+    let cache = std::fs::read_to_string(dir.path().join("hashes.cache")).unwrap();
+    assert!(cache.starts_with("dupsight-cache 1\n"), "{cache}");
+    assert_eq!(cache.lines().count(), 8, "{cache}");
+
+    let second = dupsight(
+        &["scan", "--json", "--cache", "hashes.cache", "."],
+        dir.path(),
+    );
+    assert_eq!(stdout(&second), stdout(&plain));
+    assert!(
+        stderr(&second).contains("7 of 7 images from the cache"),
+        "{}",
+        stderr(&second)
+    );
+}
+
+#[test]
+fn a_changed_file_is_hashed_again() {
+    let dir = folder();
+    dupsight(&["scan", "--cache", "hashes.cache", "."], dir.path());
+    // c.png becomes a copy of b.png: a new group must appear.
+    std::fs::write(dir.path().join("c.png"), png(&picture(2, 640, 480))).unwrap();
+    let o = dupsight(
+        &["scan", "--json", "--cache", "hashes.cache", "."],
+        dir.path(),
+    );
+    assert!(
+        stderr(&o).contains("6 of 7 images from the cache"),
+        "{}",
+        stderr(&o)
+    );
+    assert_eq!(
+        stdout(&o),
+        stdout(&dupsight(&["scan", "--json", "."], dir.path()))
+    );
+}
+
+#[test]
+fn rotations_need_hashes_the_cache_may_not_have() {
+    let dir = folder();
+    dupsight(&["scan", "--cache", "hashes.cache", "."], dir.path());
+    let o = dupsight(
+        &[
+            "scan",
+            "--json",
+            "--rotations",
+            "--cache",
+            "hashes.cache",
+            ".",
+        ],
+        dir.path(),
+    );
+    assert!(
+        stderr(&o).contains("0 of 7 images from the cache"),
+        "{}",
+        stderr(&o)
+    );
+    assert_eq!(
+        stdout(&o),
+        stdout(&dupsight(
+            &["scan", "--json", "--rotations", "."],
+            dir.path()
+        ))
+    );
+    // The full hashes now serve a scan without --rotations too.
+    let o = dupsight(&["scan", "--cache", "hashes.cache", "."], dir.path());
+    assert!(
+        stderr(&o).contains("7 of 7 images from the cache"),
+        "{}",
+        stderr(&o)
+    );
+}
+
+#[test]
+fn a_damaged_cache_is_ignored_and_rewritten() {
+    let dir = folder();
+    std::fs::write(
+        dir.path().join("hashes.cache"),
+        "dupsight-cache 1\nsomething else\n",
+    )
+    .unwrap();
+    let o = dupsight(&["scan", "--cache", "hashes.cache", "."], dir.path());
+    assert!(o.status.success());
+    assert!(stderr(&o).contains("not using the cache"), "{}", stderr(&o));
+    let cache = std::fs::read_to_string(dir.path().join("hashes.cache")).unwrap();
+    assert!(cache.starts_with("dupsight-cache 1\n"), "{cache}");
+}
+
+#[test]
+fn files_that_are_gone_leave_the_cache() {
+    let dir = folder();
+    dupsight(&["scan", "--cache", "hashes.cache", "."], dir.path());
+    std::fs::remove_file(dir.path().join("c.png")).unwrap();
+    dupsight(&["scan", "--cache", "hashes.cache", "sub"], dir.path());
+    let cache = std::fs::read_to_string(dir.path().join("hashes.cache")).unwrap();
+    // Files outside sub stay; the removed one is dropped.
+    assert_eq!(cache.lines().count(), 7, "{cache}");
+}
+
+#[test]
+fn the_cache_never_writes_over_another_file() {
+    let dir = folder();
+    let before = std::fs::read(dir.path().join("c.png")).unwrap();
+    for name in ["c.png", "notes.txt"] {
+        if name == "notes.txt" {
+            std::fs::write(dir.path().join(name), "keep me").unwrap();
+        }
+        let o = dupsight(&["scan", "--cache", name, "."], dir.path());
+        assert_eq!(o.status.code(), Some(2), "{name}");
+        assert!(stdout(&o).is_empty(), "{name}");
+    }
+    assert_eq!(std::fs::read(dir.path().join("c.png")).unwrap(), before);
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("notes.txt")).unwrap(),
+        "keep me"
+    );
+    let o = dupsight(&["scan", "--cache", "x", "--html", "x", "."], dir.path());
+    assert_eq!(o.status.code(), Some(2));
+}

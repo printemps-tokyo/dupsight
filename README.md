@@ -43,6 +43,7 @@ dupsight scan PHOTOS --json               # for scripts
 dupsight scan PHOTOS --extras             # only the files besides the ones to keep
 dupsight scan assets --check              # exit 1 if any group is found, for CI
 dupsight scan PHOTOS --jobs 2             # decode two images at a time, to use less memory
+dupsight scan PHOTOS --cache photos.cache # keep the hashes; the next scan decodes only new and changed files
 dupsight compare a.jpg b.png              # how alike two images are
 ```
 
@@ -188,6 +189,30 @@ Each image is decoded whole, then reduced to its thumbnail and let go. One
 image is decoded per CPU at a time, each allowed up to 512 MiB of pixels (the
 image crate's default limit; a larger one is skipped before it is decoded). On a machine with many CPUs
 and very large images, `--jobs` lowers how many are decoded at once.
+
+### Cache
+
+Decoding takes nearly all of a scan's time. With `--cache FILE`, dupsight
+keeps every file's hashes in FILE and, on the next scan with the same FILE,
+takes a file from it instead of decoding it again when the file has not
+changed: the same device, inode, size, modification time and status change
+time. Anything else, such as a file written since, renamed or replaced, is
+decoded again. The status change time is what makes this safe: it moves on
+every write, and unlike the modification time a program cannot set it.
+Systems other than Unix (Linux, macOS) have no such time, so there the cache
+is written but never used. The results are the same with or without the
+cache. A cache made without `--rotations` lacks the turned hashes, so the
+first scan with `--rotations` decodes everything once more.
+
+Files are kept under their full path, so scanning a subfolder with the same
+cache reuses its entries and keeps the others; entries of files that are gone
+are dropped. Like the HTML report, the cache only creates a new file or
+replaces an earlier dupsight cache, checked through the open file: a picture,
+a link or any other file at that name is refused before the scan. A cache of
+another version or a damaged one (as a scan stopped while writing it leaves)
+is ignored with a warning and rewritten; if it cannot be written, the scan
+still reports, with a warning. How many images came from the cache is printed
+on standard error.
 
 Exit status: 0 when done, 1 when `--check` found a group (or, for `compare`,
 the pictures differ), 2 on an error such as a path that does not exist.
